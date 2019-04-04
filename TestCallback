@@ -1,0 +1,104 @@
+#include "BasicStepperDriver.h"
+#include <PubSubClient.h>
+#include <Arduino.h>
+#include <WiFi.h>
+#include <Wire.h>
+
+//Defining Stepper Motor Constants/Variables
+#define MOTOR_STEPS 200
+#define RPM 60
+#define MICROSTEPS 1
+#define DIR 14
+#define STEP 32
+//2-wire Basic Configuartion
+BasicStepperDriver stepper(MOTOR_STEPS, DIR, STEP);
+
+const char* ssid = "UHWireless";
+const char* pass = "";
+const char* broker = "172.26.55.100";
+const char* roomtemp = "uh/cot/221/room_temp";
+const char* roomco2 = "uh/cot/221/room_co2";
+const char* roomtvoc = "uh/cot/221/room_tvoc";
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+
+void setup()
+{
+  // put your setup code here, to run once
+  Serial.begin(115200);
+  setupWifi();
+  client.setServer(broker, 1883);
+  client.setCallback(callback);
+   
+  //Sets up stepper motor
+  stepper.begin(RPM, MICROSTEPS);
+  delay(1000);
+}
+
+void loop()
+{
+  // put your main code here, to run repeatedly
+  if (!client.connected())
+  {
+    reconnect();
+  }
+  client.loop();
+}
+
+void setupWifi()
+{
+  delay(100);
+  Serial.print("\nConnecting to ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, pass);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(100);
+    Serial.print("-");
+  }
+
+  Serial.print("\nConnected to ");
+  Serial.println(ssid);
+}
+
+void reconnect()
+{
+  while (!client.connected())
+  {
+    Serial.print("\nConnecting to Broker: ");
+    Serial.println(broker);
+
+    if (client.connect("espClient"))
+    {
+      Serial.print("\nConnected to Server: ");
+      Serial.println(broker);
+      client.subscribe(roomtemp);
+      client.subscribe(roomco2);
+      client.subscribe(roomtvoc);
+    }
+    else
+    {
+      Serial.print("\nTrying to Connected Again...");
+      delay(5000);
+    }
+  }
+}
+
+void callback(char* topic, byte* payload, unsigned int length)
+{
+    if (String(topic) == roomtemp)
+    {
+    Serial.print("Received Message: ");
+    Serial.println(topic);
+    String room_temp = ((char*)payload);
+    float room_temperature = room_temp.toFloat();
+    Serial.print(room_temperature);
+    Serial.println();
+    float prefTemp = 75;
+    float deltaTemp = prefTemp - room_temperature;
+    Serial.print(deltaTemp);
+    }
+}
