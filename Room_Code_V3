@@ -1,7 +1,7 @@
 /***********************************************************************************
    Team 8: Alessandro, Jordan, Timmy, Mi, Jenni, Annie
    Room Code Version 3
-   March 20, 2019
+   March 20, 2019 
 
    DESCRIPTION: This code sets up and publsihes data from the HTU21D-F and CCS811
    sensors using PubSubClient libraries. We will also try to use this to count
