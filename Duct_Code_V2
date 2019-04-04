@@ -1,0 +1,247 @@
+/**********************************************************************************
+   Team 8: Alessandro, Jordan, Timmy, Mi, Jenni, Annie
+   Air Ducts Code Version 2
+   March 11, 2019
+
+   DESCRIPTION: This code sets up and publishes data from the LIS3DH and HTU21D-F
+   sensors using PubSubClient libraries. We will also enter a temperature value in
+   F to compare. This will cause motor to open(0 degrees) or close(90 degrees).                                                                               *
+ *********************************************************************************/
+#include "BasicStepperDriver.h"
+#include "Adafruit_HTU21DF.h"
+#include "SparkFunLIS3DH.h"
+#include <PubSubClient.h>
+#include <Arduino.h>
+#include <WiFi.h>
+#include <Wire.h>
+#include "SPI.h"
+
+#define uS_TO_S_FACTOR 1000000
+#define TIME_TO_SLEEP 30
+
+//Replace with the SSID and Passwords
+const char* ssid = "UHWireless";
+const char* password = "";
+
+//Add your MQTT Broker IP address
+const char* mqtt_server = "172.26.55.100";
+
+//Publishing Message??
+WiFiClient espClient;
+PubSubClient client(espClient);
+long lastMsg = 0;
+char msg[50];
+int value = 0;
+
+//LED Pin Shows Publishing
+const int ledPin = 4;
+
+//Defining Stepper Motor Constants/Variables
+#define MOTOR_STEPS 200
+#define RPM 60
+#define MICROSTEPS 1
+#define DIR 14
+#define STEP 32
+
+
+//2-wire Basic Configuartion
+BasicStepperDriver stepper(MOTOR_STEPS, DIR, STEP);
+
+
+//Setup HTU21DF sensor(temp/hum)
+Adafruit_HTU21DF htu = Adafruit_HTU21DF();
+float CVentTemp = 0;
+float FVentTemp = 0;
+float VentHumid = 0;
+
+//Setup LIS3DH sensor(accelerometer)
+LIS3DH Accelerometer (I2C_MODE, 0x18);
+float X = 0;
+float Y = 0;
+float Z = 0;
+float plate_rads = 0;
+float plate_angle = 0;
+
+//Calculation Variables
+int MotorPosition = 0;
+float FRoomTemp = 0; //This value will come from the HTU21DF sensor in the room
+float FPrefTemp = 0; //This value will come from the user interface/application
+float DeltaTemp = 0; //Change in Room Temp Vs. Prefered Temp (+/-) values
+
+void setup()
+{
+  Serial.begin(115200);
+  client.subscribe("uh/cot/221/room_temp");
+  
+  //Sets up stepper motor
+  stepper.begin(RPM, MICROSTEPS);
+  delay(1000);
+
+  //Sets up WiFi
+  setup_wifi();
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
+  pinMode(ledPin, OUTPUT);
+
+  //Check HTU21DF sensor
+  if (!htu.begin())
+  {
+    Serial.println("Problem starting sensor HTU21DF!");
+    while (1);
+  }
+  else
+  {
+    Serial.println("HTU21DF sensor successfully started.");
+  }
+
+  //Checks LIS3DH sensor
+  if (Accelerometer.begin() != 0 )
+  {
+    Serial.println("Problem starting the sensor LIS3DH!");
+  }
+  else
+  {
+    Serial.println("LIS3DH sensor successfully started.\n");
+  }
+
+
+}
+
+void setup_wifi()
+{
+  delay(10);
+  // We start by connecting to a WiFi network
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected!");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void callback(char* topic, byte* message, unsigned int length)
+{
+  Serial.print("Message arrived on topic: ");
+  Serial.print(topic);
+  Serial.print(". Message: ");
+  String messageTemp;
+
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)messageTemp[i]);
+    messageTemp += (char)message[i];
+  }
+}
+
+void reconnect()
+{
+  // Loop until we're reconnected
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Attempt to connect
+    if (client.connect("ESP8266Client")) {
+      Serial.println("connected");
+
+      // Subscribe
+      client.subscribe("/uh/cot/221/room_temp");
+    }
+
+    else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+}
+
+void loop()
+{
+  //LIS3DH - XYZ Parameters & Angle Calculation
+  X = Accelerometer.readFloatAccelX();
+  Y = Accelerometer.readFloatAccelY();
+  Z = Accelerometer.readFloatAccelZ();
+  plate_rads = atan( Y / sqrt( (X * X) + (Z * Z) ));
+  plate_angle = plate_rads * (180 / 3.1415);
+
+  //HTU21DF - C and F temperature Calculations
+  CVentTemp = htu.readTemperature();
+  FVentTemp = (1.8 * CVentTemp) + 32;
+
+  //EXPERIMENTAL VALUES
+  FRoomTemp = FVentTemp; //Actual value will come from server!
+  //Serial.print("Room Temp: ");
+  //Serial.println(FVentTemp);
+  FPrefTemp = random(65, 80); //Actual value will come from server!
+  //Serial.print("Prefered Temp: " );
+  //Serial.println(FPrefTemp);
+  DeltaTemp = FRoomTemp - FPrefTemp;
+  //Serial.print("Delta Temp: ");
+  //Serial.println(DeltaTemp);
+
+  //Checks connection to server
+  if (!client.connected())
+  {
+    reconnect();
+  }
+  client.loop();
+  //Sends data to server via Wi - Fi
+  long now = millis();
+  if (now - lastMsg > 1000)
+  {
+    lastMsg = now;
+
+    char FtempString[8];
+    dtostrf(FVentTemp, 1, 2, FtempString);
+    //Serial.print("Vent Temperature(F): ");
+    //Serial.println (FtempString);
+    client.publish("uh/cot/221/vent_temp", FtempString);
+    delay(300);
+
+    char AngleString[8];
+    dtostrf(plate_angle, 1, 2, AngleString);
+    //Serial.print("Plate Angle: ");
+    //Serial.print (AngleString); //Change to Println later
+   //Serial.println( " *not actual value until connected to damper*");
+    client.publish("uh/cot/221/plate_angle", AngleString);
+    delay(300);
+  }
+  
+  delay(300);
+
+  //Motor Control
+  if (DeltaTemp > 1 && MotorPosition < 50)
+  {
+    Serial.println("OPENING");
+    stepper.move(5 * MICROSTEPS);
+    MotorPosition = MotorPosition + 5;
+    Serial.print("MotorPosition: ");
+    Serial.println(MotorPosition);
+  }
+  else if (DeltaTemp < -1 && MotorPosition > 0)
+  {
+    Serial.println("CLOSING");
+    stepper.move(-5 * MICROSTEPS);
+    MotorPosition = MotorPosition - 5;
+    Serial.print("MotorPosition: ");
+    Serial.println(MotorPosition);
+  }
+  else
+  {
+    Serial.println("IDLE");
+    Serial.print("MotorPosition: ");
+    Serial.println(MotorPosition);
+  }
+
+  Serial.println("--------------------------------------");
+  delay(1000);
+}
