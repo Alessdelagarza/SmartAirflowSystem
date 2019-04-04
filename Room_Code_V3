@@ -1,0 +1,439 @@
+/***********************************************************************************
+   Team 8: Alessandro, Jordan, Timmy, Mi, Jenni, Annie
+   Room Code Version 3
+   March 20, 2019
+
+   DESCRIPTION: This code sets up and publsihes data from the HTU21D-F and CCS811
+   sensors using PubSubClient libraries. We will also try to use this to count
+   people in the room. This will publish data that the duct ESP32 can sucscribe to.
+   LCD screen is included in this code and occupancy example by using ultrasonic
+   sensors.
+   *********************************************************************************/
+#include <LiquidCrystal_I2C.h>
+#include "Adafruit_HTU21DF.h"
+#include "Adafruit_CCS811.h"
+#include <PubSubClient.h>
+#include <Arduino.h>
+#include <WiFiUdp.h>
+#include <WiFi.h>
+#include <Wire.h>
+#include <Math.h>
+#include "SPI.h"
+
+//Replace with SSID and Passwords
+const char* ssid = "UHWireless";
+const char* password = "";
+
+//Add your MQTT Broker IP address
+const char* mqtt_server = "172.26.55.100";
+
+//Publishing Message??
+WiFiClient espClient;
+PubSubClient client(espClient);
+long lastMsg = 0;
+char msg[50];
+int value = 0;
+
+//LED Pin Shows Publishing
+const int ledPin = 4;
+
+//Setup for the Occupancy & Ultrasonic Sensors
+const int trigPin = 14;
+const int echoPin = 32;
+const int trigPin2 = 15;
+const int echoPin2 = 33;
+
+//setup Ultrasonic Sensor Calculations
+int calcDistance_one(int trigPin, int echoPin);
+int calcDistance_two(int trigPin, int echoPin);
+int countOccupancy(int door_width);
+int distance_one;
+int distance_two;
+int door_width = 80;
+int roomOccupancy;
+
+//Setup HTU21DF sensor(temp/hum)
+Adafruit_HTU21DF htu = Adafruit_HTU21DF();
+float CRoomTemp = 0;
+float FRoomTemp = 0;
+float RoomHumid = 0;
+
+//Setup CCS811 sensor(CO2 and TVOC)
+Adafruit_CCS811 ccs;
+float RoomTVOC;
+float RoomCO2;
+
+//LCD screen setup
+LiquidCrystal_I2C lcd(0x27, 20, 4);
+
+void setup()
+{
+  Serial.begin(115200);
+  lcd.begin();
+  lcd.backlight();
+  delay(1000);
+
+  //Sets up WiFi
+  setup_wifi();
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
+  pinMode(ledPin, OUTPUT);
+
+  //Sets up state for Ultrasonic Pins
+  pinMode(trigPin, OUTPUT); // Sets the trigPin as Output
+  pinMode(echoPin, INPUT); // Sets the echoPin as Input
+  pinMode(trigPin2, OUTPUT); // Sets the trigPin2 as Output
+  pinMode(echoPin2, INPUT); // Sets the echoPin2 as Input
+
+  //Check HTU21DF sensor
+  if (!htu.begin())
+  {
+    Serial.println("Problem starting sensor HTU21DF!");
+    while (1);
+  }
+
+  //Checks CCS811 sensor
+  if (!ccs.begin())
+  {
+    Serial.println("Problem starting the sensor CCS811!");
+  }
+}
+
+void setup_wifi()
+{
+  delay(10);
+  // We start by connecting to a WiFi network
+  Serial.println();
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("WiFi connected!");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void callback(char* topic, byte* message, unsigned int length)
+{
+  Serial.print("Message arrived on topic: ");
+  Serial.print(topic);
+  Serial.print(". Message: ");
+  String messageTemp;
+
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)message[i]);
+    messageTemp += (char)message[i];
+  }
+  Serial.println();
+
+  // Feel free to add more if statements to control more GPIOs with MQTT
+  // If a message is received on the topic esp32/output, you check if the message is either "on" or "off".
+  // Changes the output state according to the message
+  if (String(topic) == "SAS/FRoomTemp") {
+    Serial.print("Changing output to ");
+    if (messageTemp == "on") {
+      Serial.println("on");
+      digitalWrite(ledPin, HIGH);
+    }
+    else if (messageTemp == "off") {
+      Serial.println("off");
+      digitalWrite(ledPin, LOW);
+    }
+  }
+}
+
+void reconnect()
+{
+  // Loop until we're reconnected
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Attempt to connect
+    if (client.connect("ESP8266Client")) {
+      Serial.println("connected");
+
+      // Subscribe
+      client.subscribe("SAS/FRoomTemp");
+      Serial.println(client.state());
+    }
+
+    else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+}
+
+void loop ()
+{
+
+
+  //HTU21DF - C and F temperature calculations & humidity
+  CRoomTemp = htu.readTemperature();
+  FRoomTemp = (1.8 * CRoomTemp) + 32;
+  Serial.print("Room Temp: ");
+  Serial.println(FRoomTemp);
+
+  lcd.setCursor(0, 0);
+  lcd.print("Temp(F):   ");
+  lcd.print(FRoomTemp);
+
+  RoomHumid = htu.readHumidity();
+  Serial.print("Humidity: ");
+  Serial.println(RoomHumid);
+
+  lcd.setCursor(0, 1);
+  lcd.print("Humidity: ");
+  lcd.print(RoomHumid);
+  lcd.print("%");
+
+  //Resetting stuff
+  if (Serial.available() > 0) {            // see if there's incoming serial data:
+    byte incomingByte = Serial.read();            // read the oldest byte in the serial buffer:
+    if (incomingByte == 'R') {              // if it's a capital R, reset the counter
+      Serial.println("Reset");
+      roomOccupancy = 0;
+      //delay(1000);
+    }
+  }
+  //Calculating distance from ultrasonic sensor 1
+  distance_one = calcDistance_one(trigPin, echoPin);
+
+  //Short delay between two sensors to prevent mistakes
+  delayMicroseconds(60);
+
+  //Calculating distance from ultrasonic sensor 2
+  distance_two = calcDistance_two(trigPin2, echoPin2);
+
+  //Short delay between two sensors to prevent mistakes
+  delayMicroseconds(60);
+
+  //Print out room occupancy
+  roomOccupancy = countOccupancy (door_width);
+
+  Serial.print("Occupancy: ");
+  Serial.println(roomOccupancy);
+  delay(1000);
+
+
+  //CCS811 - CO2 and TVOC level calculations
+  if (!ccs.readData())
+  {
+    RoomCO2 = ccs.geteCO2();
+    Serial.print("CO2(ppm): ");
+    Serial.println(RoomCO2);
+
+    lcd.setCursor(0, 2);
+    lcd.print("CO2(ppm): ");
+    lcd.print(RoomCO2);
+
+    RoomTVOC = ccs.getTVOC();
+    Serial.print("TVOC(ppb): ");
+    Serial.println(RoomTVOC);
+
+    lcd.setCursor(0, 3);
+    lcd.print("TVOC(ppb): ");
+    lcd.print(RoomTVOC);
+  }
+
+  //Checks connection to server
+  if (!client.connected())
+  {
+    reconnect();
+  }
+  client.loop();
+
+  //Sends data to server via Wi - Fi
+  long now = millis();
+  if (now - lastMsg > 1000)
+  {
+    lastMsg = now;
+
+    char FtempString[8];
+    dtostrf(FRoomTemp, 1, 2, FtempString);
+    Serial.println("Room Temperature Published");
+    client.publish("uh/cot/221/room_temp", FtempString);
+    delay(300);
+
+    char HumString[8];
+    dtostrf(RoomHumid, 1, 2, HumString);
+    Serial.println("Room Humidity Published");
+    client.publish("uh/cot/221/room_hum", HumString);
+    delay(300);
+
+    char CO2String[8];
+    dtostrf(RoomCO2, 1, 2, CO2String);
+    Serial.println("CO2 Levels Published");
+    client.publish("uh/cot/221/room_co2", CO2String);
+    delay(300);
+
+    char TVOCString[8];
+    dtostrf(RoomTVOC, 1, 2, TVOCString);
+    Serial.println("TVOC Levels Published");
+    client.publish("uh/cot/221/room_tvoc", TVOCString);
+    delay(300);
+
+    char OccupancyString[8];
+    dtostrf(roomOccupancy, 1, 2, OccupancyString);
+    Serial.println("Occupancy Count Puclished");
+    client.publish("uh/cot/221/occupancy", OccupancyString);
+    delay(300);
+  }
+}
+
+//Function Definitions
+//Calculating distance for ultrasonic sensor 1
+int calcDistance_one(int trigPin, int echoPin) {
+  //Ultrasonic Sensor ONE
+  //Clears the trigPin
+  //Gives a short LOW pulse beforehand to ensure a clean HIGH pulse
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+
+  //Sets the trigPin on HIGH state for 10 micro seconds
+  //According to specs sheet, the sensor is triggered by a HIGH pulse of 10 or more uS
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  //Read the signal from echoPin; 'duration_one' is in microsencods
+  //'duration_one' is time between emission and reception
+  long duration_one = pulseIn(echoPin, HIGH);
+
+  //Distance in centimeters
+  int distance_cmone = (duration_one / 2) / 29.1;
+
+  return distance_cmone;
+
+}
+
+int calcDistance_two(int trigPin2, int echoPin2) {
+  //Ultrasonic Sensor TWO
+  //Clears the trigPin2
+  //Gives a short LOW pulse beforehand to ensure a clean HIGH pulse
+  digitalWrite(trigPin2, LOW);
+  delayMicroseconds(2);
+
+  //Sets the trigPin2 on HIGH state for 10 micro seconds
+  //According to14 specs sheet, the sensor is triggered by a HIGH pulse of 10 or more uS
+  digitalWrite(trigPin2, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin2, LOW);
+
+  //Read the signal from echoPin; 'duration_two' is in microsencods
+  //'duration_two' is time between emission and reception
+  long duration_two = pulseIn(echoPin2, HIGH);
+
+  //Distance in centimeters
+  int distance_cmtwo = (duration_two / 2) / 29.1;
+
+  return distance_cmtwo;
+
+}
+
+//Occupancy count +/-
+int countOccupancy (int door_width) {
+
+  //Variables for counting people
+  int occupancy = 0;
+  int currentState = 0;
+  int previousState = 0;
+  int currentState2 = 0;
+  int previousState2 = 0;
+
+  // object entering in the system
+  if (distance_one <= door_width) {
+    currentState = 1;
+  }
+  else {
+    currentState = 0;
+  }
+
+  //delay(100);
+  if (currentState != previousState) {
+    while (currentState == 1) {
+      //Fetch distance of the Ultrasonic Sensor 2
+      distance_two = calcDistance_two(trigPin2, echoPin2);
+
+      if (distance_two <= door_width) {
+        currentState2 = 1;
+      }
+      else {
+        currentState2 = 0;
+      }
+
+      //delay(100);
+      if (currentState2 != previousState2) {
+        if (currentState2 == 1) {
+          occupancy++;
+
+          if (occupancy >= 0)
+          {
+            return occupancy;
+          }
+          else {
+            Serial.println("Reset");
+            occupancy = 0;
+            return occupancy;
+          }
+        }
+        else {
+          return occupancy;
+        }
+        exit;
+      }
+    }
+  }
+
+
+  // object exit from the system
+  if (distance_two <= door_width) {
+    currentState2 = 1;
+  }
+  else {
+    currentState2 = 0;
+  }
+
+  delay(100);
+  if (currentState2 != previousState2) {
+    while (currentState2 == 1) {
+      distance_one = calcDistance_one(trigPin, echoPin);
+
+      if (distance_one <= door_width) {
+        currentState = 1;
+      }
+      else {
+        currentState = 0;
+      }
+
+      delay(100);
+      if (currentState != previousState) {
+        if (currentState == 1) {
+          occupancy--;
+          if (occupancy >= 0) {
+            return occupancy;
+          }
+          else
+          {
+            Serial.println("Reset");
+            occupancy = 0;
+            return occupancy;
+          }
+        }
+        else {
+          return occupancy;
+        }
+        exit;
+      }
+    }
+  }
+}
